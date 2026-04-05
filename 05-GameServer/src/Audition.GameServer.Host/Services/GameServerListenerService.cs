@@ -476,7 +476,7 @@ public sealed class GameServerListenerService(
                     {
                         sessionState.CurrentChannelNumber = channelNumber;
                         sessionState.CurrentLocation = 0x00;
-                        sessionState.LastSuccessfulLeaveRoomTick = 0;
+                        sessionState.PendingLobbySnapshotAfterLeave = false;
 
                         byte[] enterChannelFrame = BuildEnterChannelSuccessResponse(channelNumber, sessionState.SendCipher);
                         await stream.WriteAsync(enterChannelFrame, stoppingToken);
@@ -550,11 +550,13 @@ public sealed class GameServerListenerService(
                         }
                         else
                         {
-                            if (sessionState.CurrentRoomNumber == 0 &&
-                                sessionState.CurrentLocation == 0x01)
+                            if (lobbyRequestType == 0x02 &&
+                                sessionState.CurrentRoomNumber == 0 &&
+                                sessionState.CurrentLocation == 0x01 &&
+                                sessionState.PendingLobbySnapshotAfterLeave)
                             {
-                                byte[] nonLobbyEnterFrame = BuildNonLobbyEnterResponse(sessionState, sessionState.SendCipher);
-                                await stream.WriteAsync(nonLobbyEnterFrame, stoppingToken);
+                                sessionState.PendingLobbySnapshotAfterLeave = false;
+                                await SendLobbySnapshotAsync(stream, sessionState, stoppingToken);
                                 sentLobbyFrame = true;
                             }
                             else
@@ -643,14 +645,15 @@ public sealed class GameServerListenerService(
                         sessionState.CurrentRoomNumber = roomNumber;
                         sessionState.CurrentRoomSlotIndex = 0;
                         sessionState.CurrentLocation = 0x02;
-                        sessionState.LastSuccessfulLeaveRoomTick = 0;
+                        sessionState.CurrentRoomKind = createRoomRequest.RoomKind;
                         sessionState.RoomReady = false;
                         sessionState.CurrentRoomMusicCode = 0;
                         sessionState.CurrentRoomStageCode = 0;
                         sessionState.CurrentRoomStageVariant = 0;
                         sessionState.CurrentRoomGameMode = 0;
-                        sessionState.CurrentRoomRandomMusic = 0;
+                        sessionState.CurrentRoomRandomMusic = 1;
                         sessionState.CurrentRoomRandomMode = 0;
+                        sessionState.ClosedRoomSlots.Clear();
                         sessionState.UserTeam = 0;
                         ClearSyntheticRoomGuest(sessionState);
                         if (syntheticPartnerProfile is SyntheticPartnerProfile configuredSyntheticPartner)
@@ -668,6 +671,7 @@ public sealed class GameServerListenerService(
                         sessionState.CurrentRoomMusicChecksum = 0;
                         sessionState.CurrentGameScore = 0;
                         sessionState.CurrentGamePerfectCount = 0;
+                        sessionState.PendingLobbySnapshotAfterLeave = false;
 
                         byte[] createRoomAckFrame = BuildCreateRoomAcceptedResponse(roomNumber, sessionState.SendCipher);
                         await stream.WriteAsync(createRoomAckFrame, stoppingToken);
@@ -795,6 +799,29 @@ public sealed class GameServerListenerService(
 
                         switch (roomHostChangeRequest.SubOpcode)
                         {
+                            case 0x00:
+                                if (TryToggleRoomSlot(sessionState, roomHostChangeRequest.Value8, out byte toggledSlotState))
+                                {
+                                    byte[] slotToggleFrame = BuildRoomSlotToggleResponse(roomHostChangeRequest.Value8, toggledSlotState, sessionState.SendCipher);
+                                    await stream.WriteAsync(slotToggleFrame, stoppingToken);
+
+                                    byte[] roomSummaryFrame = BuildRoomSlotSummaryChangedResponse(sessionState, sessionState.SendCipher);
+                                    await stream.WriteAsync(roomSummaryFrame, stoppingToken);
+
+                                    byte[] roomSlotsStartFrame = BuildRoomSlotListStartResponse(sessionState.SendCipher);
+                                    await stream.WriteAsync(roomSlotsStartFrame, stoppingToken);
+
+                                    for (byte slotIndex = 0; slotIndex < 0x11; slotIndex++)
+                                    {
+                                        byte[] roomSlotItemFrame = BuildRoomSlotListItemResponse(sessionState, slotIndex, sessionState.SendCipher);
+                                        await stream.WriteAsync(roomSlotItemFrame, stoppingToken);
+                                    }
+
+                                    byte[] roomSlotsEndFrame = BuildRoomSlotListEndResponse(sessionState.SendCipher);
+                                    await stream.WriteAsync(roomSlotsEndFrame, stoppingToken);
+                                }
+                                break;
+
                             case 0x02:
                                 sessionState.CurrentRoomMusicCode = roomHostChangeRequest.Value16;
                                 sessionState.CurrentRoomRandomMusic = roomHostChangeRequest.Value8;
@@ -815,7 +842,21 @@ public sealed class GameServerListenerService(
                                 break;
 
                             case 0x04:
-                                sessionState.CurrentRoomGameMode = roomHostChangeRequest.Value8;
+                                if (!TryApplyRoomGameModeChange(sessionState, roomHostChangeRequest.Value8, out byte roomGameModeErrorCode))
+                                {
+                                    byte[] gameModeErrorFrame = BuildRoomGameModeChangeErrorResponse(roomGameModeErrorCode, sessionState.SendCipher);
+                                    await stream.WriteAsync(gameModeErrorFrame, stoppingToken);
+                                    await stream.FlushAsync(stoppingToken);
+
+                                    logger.LogInformation(
+                                        "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_ROOM_HOST_ERROR | SessionId={SessionId} | SubOpcode={SubOpcode} | ErrorCode={ErrorCode} | Value8={Value8} | GameModeName={GameModeName}",
+                                        sessionId,
+                                        roomHostChangeRequest.SubOpcode,
+                                        roomGameModeErrorCode,
+                                        roomHostChangeRequest.Value8,
+                                        ResolveRoomGameModeName(roomHostChangeRequest.Value8));
+                                    continue;
+                                }
 
                                 byte[] gameModeChangedFrame = BuildRoomGameModeChangedResponse(sessionState, sessionState.SendCipher);
                                 await stream.WriteAsync(gameModeChangedFrame, stoppingToken);
@@ -832,11 +873,14 @@ public sealed class GameServerListenerService(
                         await stream.FlushAsync(stoppingToken);
 
                         logger.LogInformation(
-                            "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_ROOM_HOST | SessionId={SessionId} | SubOpcode={SubOpcode} | Value16={Value16} | Value8={Value8}",
+                            "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_ROOM_HOST | SessionId={SessionId} | SubOpcode={SubOpcode} | Value16={Value16} | Value8={Value8} | SlotState={SlotState} | GameModeName={GameModeName} | RandomModeName={RandomModeName}",
                             sessionId,
                             roomHostChangeRequest.SubOpcode,
                             roomHostChangeRequest.Value16,
-                            roomHostChangeRequest.Value8);
+                            roomHostChangeRequest.Value8,
+                            roomHostChangeRequest.SubOpcode == 0x00 ? GetRoomSlotState(sessionState, roomHostChangeRequest.Value8) : (byte)0xFF,
+                            roomHostChangeRequest.SubOpcode == 0x04 ? ResolveRoomGameModeName(roomHostChangeRequest.Value8) : "N/A",
+                            roomHostChangeRequest.SubOpcode == 0x05 ? ResolveRoomRandomModeName(roomHostChangeRequest.Value8) : "N/A");
                         continue;
                     }
 
@@ -864,14 +908,16 @@ public sealed class GameServerListenerService(
                             byte[] hackListFrame = BuildRoomGameHackListResponse(sessionState.SendCipher);
                             await stream.WriteAsync(hackListFrame, stoppingToken);
 
-                            byte[] gameStartFrame = BuildRoomGameStartSuccessResponse(randomSeed, sessionState.SendCipher);
+                            byte[] gameStartFrame = BuildRoomGameStartSuccessResponse(sessionState, randomSeed, sessionState.SendCipher);
                             await stream.WriteAsync(gameStartFrame, stoppingToken);
 
                             logger.LogInformation(
-                                "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_GAME_START_AUTO | SessionId={SessionId} | RoomNumber={RoomNumber} | RandomSeed={RandomSeed}",
+                                "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_GAME_START_AUTO | SessionId={SessionId} | RoomNumber={RoomNumber} | RandomSeed={RandomSeed} | GameMode={GameMode} | GameModeName={GameModeName}",
                                 sessionId,
                                 sessionState.CurrentRoomNumber,
-                                randomSeed);
+                                randomSeed,
+                                sessionState.CurrentRoomGameMode,
+                                ResolveRoomGameModeName(sessionState.CurrentRoomGameMode));
                         }
 
                         await stream.FlushAsync(stoppingToken);
@@ -952,20 +998,36 @@ public sealed class GameServerListenerService(
                             continue;
                         }
 
+                        if (!IsImplementedRoomGameMode(sessionState.CurrentRoomGameMode))
+                        {
+                            byte[] errorFrame = BuildRoomGameStartErrorResponse(sessionState.SendCipher);
+                            await stream.WriteAsync(errorFrame, stoppingToken);
+                            await stream.FlushAsync(stoppingToken);
+
+                            logger.LogInformation(
+                                "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_GAME_START_ERROR | SessionId={SessionId} | Reason=UnsupportedGameMode | GameMode={GameMode} | GameModeName={GameModeName}",
+                                sessionId,
+                                sessionState.CurrentRoomGameMode,
+                                ResolveRoomGameModeName(sessionState.CurrentRoomGameMode));
+                            continue;
+                        }
+
                         uint randomSeed = BeginRoomGame(sessionState);
 
                         byte[] hackListFrame = BuildRoomGameHackListResponse(sessionState.SendCipher);
                         await stream.WriteAsync(hackListFrame, stoppingToken);
 
-                        byte[] gameStartFrame = BuildRoomGameStartSuccessResponse(randomSeed, sessionState.SendCipher);
+                        byte[] gameStartFrame = BuildRoomGameStartSuccessResponse(sessionState, randomSeed, sessionState.SendCipher);
                         await stream.WriteAsync(gameStartFrame, stoppingToken);
                         await stream.FlushAsync(stoppingToken);
 
                         logger.LogInformation(
-                            "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_GAME_START | SessionId={SessionId} | RoomNumber={RoomNumber} | RandomSeed={RandomSeed}",
+                            "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_GAME_START | SessionId={SessionId} | RoomNumber={RoomNumber} | RandomSeed={RandomSeed} | GameMode={GameMode} | GameModeName={GameModeName}",
                             sessionId,
                             sessionState.CurrentRoomNumber,
-                            randomSeed);
+                            randomSeed,
+                            sessionState.CurrentRoomGameMode,
+                            ResolveRoomGameModeName(sessionState.CurrentRoomGameMode));
                         continue;
                     }
 
@@ -978,9 +1040,9 @@ public sealed class GameServerListenerService(
                         {
                             if (sessionState.CurrentLocation == 0x01)
                             {
-                                sessionState.LastSuccessfulLeaveRoomTick = Environment.TickCount64;
-                                byte[] duplicateLobbyEnterFrame = BuildNonLobbyEnterResponse(sessionState, sessionState.SendCipher);
-                                await stream.WriteAsync(duplicateLobbyEnterFrame, stoppingToken);
+                                byte[] duplicateLeaveRoomAcceptedFrame = BuildLeaveRoomAcceptedResponse(sessionState.SendCipher);
+                                await stream.WriteAsync(duplicateLeaveRoomAcceptedFrame, stoppingToken);
+                                await SendLobbySnapshotAsync(stream, sessionState, stoppingToken);
                                 await stream.FlushAsync(stoppingToken);
 
                                 logger.LogInformation(
@@ -1005,6 +1067,7 @@ public sealed class GameServerListenerService(
                         sessionState.CurrentRoomNumber = 0;
                         sessionState.CurrentRoomSlotIndex = 0;
                         sessionState.CurrentLocation = 0x01;
+                        sessionState.CurrentRoomKind = 0;
                         sessionState.RoomReady = false;
                         sessionState.CurrentRoomMusicCode = 0;
                         sessionState.CurrentRoomStageCode = 0;
@@ -1012,6 +1075,7 @@ public sealed class GameServerListenerService(
                         sessionState.CurrentRoomGameMode = 0;
                         sessionState.CurrentRoomRandomMusic = 0;
                         sessionState.CurrentRoomRandomMode = 0;
+                        sessionState.ClosedRoomSlots.Clear();
                         sessionState.UserTeam = 0;
                         sessionState.HasSyntheticRoomGuest = false;
                         sessionState.SyntheticRoomGuestSlotIndex = 0;
@@ -1028,10 +1092,12 @@ public sealed class GameServerListenerService(
                         sessionState.CurrentRoomMusicChecksum = 0;
                         sessionState.CurrentGameScore = 0;
                         sessionState.CurrentGamePerfectCount = 0;
-                        sessionState.LastSuccessfulLeaveRoomTick = Environment.TickCount64;
+                        sessionState.PendingLobbySnapshotAfterLeave = true;
 
-                        byte[] lobbyEnterFrame = BuildNonLobbyEnterResponse(sessionState, sessionState.SendCipher);
-                        await stream.WriteAsync(lobbyEnterFrame, stoppingToken);
+                        byte[] leaveRoomAcceptedFrame = BuildLeaveRoomAcceptedResponse(sessionState.SendCipher);
+                        await stream.WriteAsync(leaveRoomAcceptedFrame, stoppingToken);
+
+                        await SendLobbySnapshotAsync(stream, sessionState, stoppingToken);
 
                         await stream.FlushAsync(stoppingToken);
 
@@ -1162,7 +1228,8 @@ public sealed class GameServerListenerService(
                                 sessionState.GameStartTickCount = startTickCount;
                                 sessionState.GameStartBroadcastSent = true;
 
-                                byte[] startSyncFrame = BuildInGameStartSyncResponse(startTickCount, teamMode: 0, sessionState.SendCipher);
+                                byte startSyncTeamMode = ResolveStartSyncTeamMode(sessionState);
+                                byte[] startSyncFrame = BuildInGameStartSyncResponse(startTickCount, startSyncTeamMode, sessionState.SendCipher);
                                 await stream.WriteAsync(startSyncFrame, stoppingToken);
                                 await stream.FlushAsync(stoppingToken);
 
@@ -1170,7 +1237,7 @@ public sealed class GameServerListenerService(
                                     "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_INGAME_START_SYNC | SessionId={SessionId} | StartTickCount={StartTickCount} | TeamMode={TeamMode}",
                                     sessionId,
                                     startTickCount,
-                                    0);
+                                    startSyncTeamMode);
                             }
 
                             logger.LogInformation(
@@ -1214,6 +1281,7 @@ public sealed class GameServerListenerService(
 
                         sessionState.CurrentLocation = 0x02;
                         sessionState.RoomReady = false;
+                        sessionState.CurrentRoomKind = 0;
                         sessionState.GameStartActive = false;
                         sessionState.GameMusicReady = false;
                         sessionState.SyntheticRoomGuestMusicReady = false;
@@ -1234,9 +1302,10 @@ public sealed class GameServerListenerService(
                         await stream.FlushAsync(stoppingToken);
 
                         logger.LogInformation(
-                            "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_GAME_END | SessionId={SessionId} | RoomNumber={RoomNumber} | Score={Score} | BeforeExperience={BeforeExperience} | BaseExperience={BaseExperience} | BonusExperience={BonusExperience} | Money={Money} | PlayerCount={PlayerCount}",
+                            "[AUDITION FLOW] ENTRAR_SALA_RESPONSE_GAME_END | SessionId={SessionId} | RoomNumber={RoomNumber} | SubOpcode={SubOpcode} | Score={Score} | BeforeExperience={BeforeExperience} | BaseExperience={BaseExperience} | BonusExperience={BonusExperience} | Money={Money} | PlayerCount={PlayerCount}",
                             sessionId,
                             sessionState.CurrentRoomNumber,
+                            gameEndRequest.SubOpcode,
                             gameEndState.SelfEntry.TotalScore,
                             gameEndState.SelfEntry.BeforeExperience,
                             gameEndState.SelfEntry.BaseExperience,
@@ -1569,6 +1638,27 @@ public sealed class GameServerListenerService(
         return requestType <= 0x02;
     }
 
+    private static async Task SendLobbySnapshotAsync(
+        NetworkStream stream,
+        GameClientSessionState sessionState,
+        CancellationToken stoppingToken)
+    {
+        byte[] lobbyEnterFrame = BuildLocationChangedResponse(sessionState, sessionState.SendCipher);
+        await stream.WriteAsync(lobbyEnterFrame, stoppingToken);
+
+        byte[] roomListStartFrame = BuildRoomListStartResponse(0, sessionState.SendCipher);
+        byte[] roomListEndFrame = BuildRoomListEndResponse(sessionState.SendCipher);
+        byte[] userListStartFrame = BuildUserListStartResponse(1, sessionState.SendCipher);
+        byte[] userListItemFrame = BuildUserListItemResponse(sessionState, sessionState.SendCipher);
+        byte[] userListEndFrame = BuildUserListEndResponse(sessionState.SendCipher);
+
+        await stream.WriteAsync(roomListStartFrame, stoppingToken);
+        await stream.WriteAsync(roomListEndFrame, stoppingToken);
+        await stream.WriteAsync(userListStartFrame, stoppingToken);
+        await stream.WriteAsync(userListItemFrame, stoppingToken);
+        await stream.WriteAsync(userListEndFrame, stoppingToken);
+    }
+
     private static bool TryParseMusicMallRequest(byte[] plainFrame, out byte requestType)
     {
         requestType = 0;
@@ -1657,6 +1747,17 @@ public sealed class GameServerListenerService(
         }
 
         byte subOpcode = plainFrame[3];
+        if (subOpcode == 0x00)
+        {
+            if (plainFrame.Length != 5)
+            {
+                return false;
+            }
+
+            request = new RoomHostChangeRequest(subOpcode, 0, plainFrame[4]);
+            return true;
+        }
+
         if (subOpcode is 0x02 or 0x03)
         {
             if (plainFrame.Length != 7)
@@ -1864,6 +1965,18 @@ public sealed class GameServerListenerService(
         if (plainFrame.Length == 4 && plainFrame[2] == 0x1E && plainFrame[3] == 0x01)
         {
             request = new GameEndRequest(0x01, 0, (byte)Math.Clamp(defaultLevel, 0, byte.MaxValue), 0);
+            return true;
+        }
+
+        if (plainFrame.Length == 4 && plainFrame[2] == 0x1E && plainFrame[3] == 0x02)
+        {
+            request = new GameEndRequest(0x02, 0, (byte)Math.Clamp(defaultLevel, 0, byte.MaxValue), 0);
+            return true;
+        }
+
+        if (plainFrame.Length >= 4 && plainFrame[2] == 0x1E && plainFrame[3] == 0x05)
+        {
+            request = new GameEndRequest(0x05, 0, (byte)Math.Clamp(defaultLevel, 0, byte.MaxValue), 0);
             return true;
         }
 
@@ -2159,7 +2272,7 @@ public sealed class GameServerListenerService(
         return EncryptTafFrame(cipher, BuildPlainFrame([.. body]));
     }
 
-    private static byte[] BuildNonLobbyEnterResponse(GameClientSessionState sessionState, TafCipher cipher)
+    private static byte[] BuildLocationChangedResponse(GameClientSessionState sessionState, TafCipher cipher)
     {
         List<byte> body = [0x15, 0x07];
         AddLengthPrefixedString(body, sessionState.UserNickname);
@@ -2241,6 +2354,7 @@ public sealed class GameServerListenerService(
         return sessionState.RoomReady &&
             sessionState.CurrentRoomNumber != 0 &&
             sessionState.CurrentRoomSlotIndex == 0 &&
+            IsImplementedRoomGameMode(sessionState.CurrentRoomGameMode) &&
             (!sessionState.HasSyntheticRoomGuest || sessionState.SyntheticRoomGuestReady);
     }
 
@@ -2303,6 +2417,11 @@ public sealed class GameServerListenerService(
         return EncryptTafFrame(cipher, BuildPlainFrame([0x17, 0x01, 0x01]));
     }
 
+    private static byte[] BuildLeaveRoomAcceptedResponse(TafCipher cipher)
+    {
+        return EncryptTafFrame(cipher, BuildPlainFrame([0x17, 0x01, 0x00]));
+    }
+
     private static byte[] BuildRoomPresenceResponse(
         byte slotIndex,
         string nickname,
@@ -2360,6 +2479,32 @@ public sealed class GameServerListenerService(
         return EncryptTafFrame(cipher, BuildPlainFrame([0x1A, 0x04, 0x00, sessionState.CurrentRoomGameMode]));
     }
 
+    private static byte[] BuildRoomSlotToggleResponse(byte slotIndex, byte slotState, TafCipher cipher)
+    {
+        return EncryptTafFrame(cipher, BuildPlainFrame([0x1A, 0x00, 0x00, slotIndex, slotState]));
+    }
+
+    private static byte[] BuildRoomSlotSummaryChangedResponse(GameClientSessionState sessionState, TafCipher cipher)
+    {
+        byte currentUsers = (byte)(sessionState.HasSyntheticRoomGuest ? 2 : 1);
+        byte maxUsers = CountOpenRoomSlots(sessionState, includeAudience: false);
+        byte audienceCount = 0;
+        byte maxAudience = CountOpenRoomSlots(sessionState, includeAudience: true);
+
+        List<byte> body = [0x15, 0x06];
+        AddUInt16(body, sessionState.CurrentRoomNumber);
+        body.Add(currentUsers);
+        body.Add(maxUsers);
+        body.Add(audienceCount);
+        body.Add(maxAudience);
+        return EncryptTafFrame(cipher, BuildPlainFrame([.. body]));
+    }
+
+    private static byte[] BuildRoomGameModeChangeErrorResponse(byte errorCode, TafCipher cipher)
+    {
+        return EncryptTafFrame(cipher, BuildPlainFrame([0x1A, 0x04, errorCode]));
+    }
+
     private static byte[] BuildRoomRandomModeChangedResponse(GameClientSessionState sessionState, TafCipher cipher)
     {
         return EncryptTafFrame(cipher, BuildPlainFrame([0x1A, 0x05, 0x00, sessionState.CurrentRoomRandomMode]));
@@ -2407,12 +2552,12 @@ public sealed class GameServerListenerService(
         return EncryptTafFrame(cipher, BuildPlainFrame([0x1B, 0x05, 0x00, 0x00]));
     }
 
-    private static byte[] BuildRoomGameStartSuccessResponse(uint randomSeed, TafCipher cipher)
+    private static byte[] BuildRoomGameStartSuccessResponse(GameClientSessionState sessionState, uint randomSeed, TafCipher cipher)
     {
         List<byte> body = [0x1B, 0x02, 0x00];
         AddUInt32(body, randomSeed);
-        body.Add(0x01);
-        body.Add(0x00);
+        body.Add(ResolveStartMissionFlag(sessionState));
+        body.Add(ResolveStartTeamGenderFightFlag(sessionState));
         return EncryptTafFrame(cipher, BuildPlainFrame([.. body]));
     }
 
@@ -2454,6 +2599,104 @@ public sealed class GameServerListenerService(
         AddUInt32(body, startTickCount);
         body.Add(teamMode);
         return EncryptTafFrame(cipher, BuildPlainFrame([.. body]));
+    }
+
+    private static byte ResolveStartSyncTeamMode(GameClientSessionState sessionState)
+    {
+        if (sessionState.CurrentRoomGameMode is not 0x01 and not 0x05)
+        {
+            return 0;
+        }
+
+        if (!HasRoomTeamAssignments(sessionState))
+        {
+            return 0;
+        }
+
+        return (byte)Random.Shared.Next(1, 3);
+    }
+
+    private static bool HasRoomTeamAssignments(GameClientSessionState sessionState)
+    {
+        if (sessionState.UserTeam is 0x01 or 0x02)
+        {
+            return true;
+        }
+
+        return sessionState.HasSyntheticRoomGuest && sessionState.SyntheticRoomGuestTeam is 0x01 or 0x02;
+    }
+
+    private static bool TryApplyRoomGameModeChange(GameClientSessionState sessionState, byte requestedMode, out byte errorCode)
+    {
+        errorCode = 0;
+
+        if ((sessionState.CurrentRoomKind & 0x08) != 0)
+        {
+            errorCode = 0x01;
+            return false;
+        }
+
+        if (!IsImplementedRoomGameMode(requestedMode))
+        {
+            errorCode = 0x02;
+            return false;
+        }
+
+        sessionState.CurrentRoomGameMode = requestedMode;
+        sessionState.CurrentRoomRandomMode = requestedMode is 0x05 or 0x06 ? (byte)0x01 : (byte)0x00;
+        return true;
+    }
+
+    private static bool IsImplementedRoomGameMode(byte requestedMode)
+    {
+        return requestedMode is 0x00 or 0x01 or 0x05;
+    }
+
+    private static string ResolveRoomGameModeName(byte requestedMode)
+    {
+        return requestedMode switch
+        {
+            0x00 => "Normal",
+            0x01 => "Freestyle",
+            0x02 => "Unison",
+            0x03 => "Unison High",
+            0x04 => "Unison 8-Way",
+            0x05 => "Random",
+            0x06 => "Team Random",
+            _ => $"Unknown(0x{requestedMode:X2})"
+        };
+    }
+
+    private static string ResolveRoomRandomModeName(byte randomMode)
+    {
+        return randomMode switch
+        {
+            0x00 => "Off",
+            0x01 => "On",
+            _ => $"Unknown(0x{randomMode:X2})"
+        };
+    }
+
+    private static byte ResolveStartMissionFlag(GameClientSessionState sessionState)
+    {
+        return sessionState.CurrentRoomGameMode == 0x05 ? (byte)0x01 : (byte)0x00;
+    }
+
+    private static byte ResolveStartTeamGenderFightFlag(GameClientSessionState sessionState)
+    {
+        if (!HasRoomTeamAssignments(sessionState))
+        {
+            return 0;
+        }
+
+        bool hasUserTeam = sessionState.UserTeam is 0x01 or 0x02;
+        bool hasGuestTeam = sessionState.HasSyntheticRoomGuest && sessionState.SyntheticRoomGuestTeam is 0x01 or 0x02;
+        if (!hasUserTeam || !hasGuestTeam)
+        {
+            return 0;
+        }
+
+        return sessionState.UserGender != sessionState.SyntheticRoomGuestGender ? (byte)0x01 : (byte)0x00;
     }
 
     private static byte[] BuildInGameDanceStepResponse(
@@ -2658,8 +2901,73 @@ public sealed class GameServerListenerService(
             return EncryptTafFrame(cipher, BuildPlainFrame([.. body]));
         }
 
-        body.Add(0x00);
+        body.Add(GetRoomSlotState(sessionState, slotIndex));
         return EncryptTafFrame(cipher, BuildPlainFrame([.. body]));
+    }
+
+    private static byte GetRoomSlotState(GameClientSessionState sessionState, byte slotIndex)
+    {
+        if (slotIndex == sessionState.CurrentRoomSlotIndex)
+        {
+            return 0x02;
+        }
+
+        if (sessionState.HasSyntheticRoomGuest && slotIndex == sessionState.SyntheticRoomGuestSlotIndex)
+        {
+            return 0x02;
+        }
+
+        return sessionState.ClosedRoomSlots.Contains(slotIndex) ? (byte)0x01 : (byte)0x00;
+    }
+
+    private static bool TryToggleRoomSlot(GameClientSessionState sessionState, byte slotIndex, out byte slotState)
+    {
+        slotState = GetRoomSlotState(sessionState, slotIndex);
+
+        if (slotIndex >= 0x11)
+        {
+            return false;
+        }
+
+        if (slotIndex == sessionState.CurrentRoomSlotIndex)
+        {
+            return false;
+        }
+
+        if (sessionState.HasSyntheticRoomGuest && slotIndex == sessionState.SyntheticRoomGuestSlotIndex)
+        {
+            return false;
+        }
+
+        if ((sessionState.CurrentRoomKind & 0x08) != 0 && slotIndex == 0x05)
+        {
+            return false;
+        }
+
+        if (!sessionState.ClosedRoomSlots.Add(slotIndex))
+        {
+            sessionState.ClosedRoomSlots.Remove(slotIndex);
+        }
+
+        slotState = GetRoomSlotState(sessionState, slotIndex);
+        return true;
+    }
+
+    private static byte CountOpenRoomSlots(GameClientSessionState sessionState, bool includeAudience)
+    {
+        int start = includeAudience ? 6 : 0;
+        int endExclusive = includeAudience ? 0x11 : 6;
+        int count = 0;
+
+        for (int slotIndex = start; slotIndex < endExclusive; slotIndex++)
+        {
+            if (!sessionState.ClosedRoomSlots.Contains((byte)slotIndex))
+            {
+                count++;
+            }
+        }
+
+        return (byte)count;
     }
 
     private ServerMusicReadyPayload ResolveMusicReadyPayload(string musicName, uint clientChecksum)
@@ -3561,9 +3869,9 @@ internal sealed class GameClientSessionState
 
     public byte CurrentLocation { get; set; }
 
-    public long LastSuccessfulLeaveRoomTick { get; set; }
-
     public ushort CurrentRoomNumber { get; set; }
+
+    public byte CurrentRoomKind { get; set; }
 
     public byte CurrentRoomSlotIndex { get; set; }
 
@@ -3580,6 +3888,8 @@ internal sealed class GameClientSessionState
     public byte CurrentRoomRandomMusic { get; set; }
 
     public byte CurrentRoomRandomMode { get; set; }
+
+    public HashSet<byte> ClosedRoomSlots { get; } = [];
 
     public bool GameStartActive { get; set; }
 
@@ -3598,6 +3908,8 @@ internal sealed class GameClientSessionState
     public string CurrentRoomMusicName { get; set; } = string.Empty;
 
     public uint CurrentRoomMusicChecksum { get; set; }
+
+    public bool PendingLobbySnapshotAfterLeave { get; set; }
 
     public bool HasSyntheticRoomGuest { get; set; }
 

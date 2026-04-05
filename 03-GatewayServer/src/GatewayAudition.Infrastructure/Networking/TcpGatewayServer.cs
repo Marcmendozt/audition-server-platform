@@ -153,18 +153,35 @@ public sealed class TcpGatewayServer : IGatewayServer, IDisposable
         }
         catch (IOException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            _logger.LogWarning(
-                ex,
-                "[AUDITION FLOW] CLIENT_TRANSPORT_ABORT | Ip={Ip} | Session={Index} | UserSN={UserSerial} | Buffered={Buffered} | LastInbound={LastInbound} | LastInboundPlainHex={LastInboundPlainHex} | LastOutbound={LastOutbound} | LastOutboundPlainHex={LastOutboundPlainHex} | LastOutboundFrameHex={LastOutboundFrameHex}",
-                session.SessionInfo.IpAddress,
-                session.UniqueIndex,
-                user.Player.UserSerialNumber,
-                session.ReceivedSize,
-                session.LastInboundPacketSummary,
-                session.LastInboundPlainHex,
-                session.LastOutboundPacketLabel,
-                session.LastOutboundPlainHex,
-                session.LastOutboundFrameHex);
+            if (IsExpectedRemoteDisconnect(ex))
+            {
+                _logger.LogInformation(
+                    "[AUDITION FLOW] CLIENT_REMOTE_DISCONNECT | Ip={Ip} | Session={Index} | UserSN={UserSerial} | Buffered={Buffered} | LastInbound={LastInbound} | LastInboundPlainHex={LastInboundPlainHex} | LastOutbound={LastOutbound} | LastOutboundPlainHex={LastOutboundPlainHex} | LastOutboundFrameHex={LastOutboundFrameHex}",
+                    session.SessionInfo.IpAddress,
+                    session.UniqueIndex,
+                    user.Player.UserSerialNumber,
+                    session.ReceivedSize,
+                    session.LastInboundPacketSummary,
+                    session.LastInboundPlainHex,
+                    session.LastOutboundPacketLabel,
+                    session.LastOutboundPlainHex,
+                    session.LastOutboundFrameHex);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    ex,
+                    "[AUDITION FLOW] CLIENT_TRANSPORT_ABORT | Ip={Ip} | Session={Index} | UserSN={UserSerial} | Buffered={Buffered} | LastInbound={LastInbound} | LastInboundPlainHex={LastInboundPlainHex} | LastOutbound={LastOutbound} | LastOutboundPlainHex={LastOutboundPlainHex} | LastOutboundFrameHex={LastOutboundFrameHex}",
+                    session.SessionInfo.IpAddress,
+                    session.UniqueIndex,
+                    user.Player.UserSerialNumber,
+                    session.ReceivedSize,
+                    session.LastInboundPacketSummary,
+                    session.LastInboundPlainHex,
+                    session.LastOutboundPacketLabel,
+                    session.LastOutboundPlainHex,
+                    session.LastOutboundFrameHex);
+            }
         }
         catch (Exception ex)
         {
@@ -180,6 +197,9 @@ public sealed class TcpGatewayServer : IGatewayServer, IDisposable
         }
         finally
         {
+            string disconnectIp = session.SessionInfo.IpAddress;
+            uint disconnectSessionIndex = session.UniqueIndex;
+
             if (user.AccountSessionId.HasValue)
             {
                 try
@@ -192,11 +212,13 @@ public sealed class TcpGatewayServer : IGatewayServer, IDisposable
                 }
             }
 
+            _logger.LogInformation(
+                "[AUDITION FLOW] CLIENT_BOOTSTRAP_DISCONNECT | Ip={Ip} | Session={Index}",
+                disconnectIp,
+                disconnectSessionIndex);
+
             _playerManager.RemovePlayer((int)session.UniqueIndex);
             _sessionManager.ReturnSession(session);
-
-            _logger.LogInformation("[AUDITION FLOW] CLIENT_BOOTSTRAP_DISCONNECT | Ip={Ip} | Session={Index}",
-                session.SessionInfo.IpAddress, session.UniqueIndex);
         }
     }
 
@@ -285,6 +307,12 @@ public sealed class TcpGatewayServer : IGatewayServer, IDisposable
             0x03 when plainPacket.Length >= 4 => $"ServerDirectory/SubOpcode=0x{plainPacket[3]:X2}",
             _ => $"Opcode=0x{command:X2}"
         };
+    }
+
+    private static bool IsExpectedRemoteDisconnect(IOException exception)
+    {
+        return exception.InnerException is SocketException socketException &&
+            socketException.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted;
     }
 
     public void Dispose()
