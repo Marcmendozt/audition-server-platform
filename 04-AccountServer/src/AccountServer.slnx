@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="AccountServer.Application/AccountServer.Application.csproj" />
+  <Project Path="AccountServer.Domain/AccountServer.Domain.csproj" />
+  <Project Path="AccountServer.Host/AccountServer.Host.csproj" />
+  <Project Path="AccountServer.Infrastructure/AccountServer.Infrastructure.csproj" />
+</Solution>

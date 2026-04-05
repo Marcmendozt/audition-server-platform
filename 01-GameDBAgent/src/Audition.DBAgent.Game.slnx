@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Audition.DBAgent.Game.Domain/Audition.DBAgent.Game.Domain.csproj" />
+  <Project Path="Audition.DBAgent.Game.Application/Audition.DBAgent.Game.Application.csproj" />
+  <Project Path="Audition.DBAgent.Game.Infrastructure/Audition.DBAgent.Game.Infrastructure.csproj" />
+  <Project Path="Audition.DBAgent.Game.Host/Audition.DBAgent.Game.Host.csproj" />
+  <Project Path="Audition.DBAgent.Game.Tests/Audition.DBAgent.Game.Tests.csproj" />
+</Solution>

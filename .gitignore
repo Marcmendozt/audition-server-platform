@@ -1,0 +1,38 @@
+# Visual Studio / .NET
+.vs/
+**/bin/
+**/obj/
+*.user
+*.suo
+*.userosscache
+*.rsuser
+
+# Build outputs and verification artifacts
+**/artifacts/
+**/build-verify/
+
+# Logs and reports
+**/log/
+**/logs/
+**/Report/
+*.log
+
+# Decompiled or native extracted content
+**/native/decompiled/
+
+# Legacy backups and temporary files
+*.bak
+*.tmp
+*.temp
+Thumbs.db
+Desktop.ini
+
+# Tooling / editor
+.vscode/
+
+# Game client binaries and assets
+06-AuditionClient/
+
+# Legacy game server runtime content not needed in source control
+05-GameServer/antiguo/
+05-GameServer/build-verify/

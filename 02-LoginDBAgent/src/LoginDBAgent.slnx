@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="LoginDBAgent.Domain/LoginDBAgent.Domain.csproj" />
+  <Project Path="LoginDBAgent.Application/LoginDBAgent.Application.csproj" />
+  <Project Path="LoginDBAgent.Infrastructure/LoginDBAgent.Infrastructure.csproj" />
+  <Project Path="LoginDBAgent.Host/LoginDBAgent.Host.csproj" />
+  <Project Path="LoginDBAgent.Tests/LoginDBAgent.Tests.csproj" />
+</Solution>

@@ -1,0 +1,29 @@
+[
+  {
+    "nickname": "partner",
+    "userId": "partner",
+    "gender": 1,
+    "experience": 1,
+    "power": 0,
+    "ready": true,
+    "team": 0
+  },
+  {
+    "nickname": "stardust",
+    "userId": "stardust",
+    "gender": 1,
+    "experience": 540000,
+    "power": 7,
+    "ready": true,
+    "team": 0
+  },
+  {
+    "nickname": "rhythmfox",
+    "userId": "rhythmfox",
+    "gender": 0,
+    "experience": 920000,
+    "power": 9,
+    "ready": true,
+    "team": 0
+  }
+]

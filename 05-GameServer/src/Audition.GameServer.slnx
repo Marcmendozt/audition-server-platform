@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Audition.GameServer.Domain/Audition.GameServer.Domain.csproj" />
+  <Project Path="Audition.GameServer.Application/Audition.GameServer.Application.csproj" />
+  <Project Path="Audition.GameServer.Infrastructure/Audition.GameServer.Infrastructure.csproj" />
+  <Project Path="Audition.GameServer.Host/Audition.GameServer.Host.csproj" />
+  <Project Path="Audition.GameServer.Tests/Audition.GameServer.Tests.csproj" />
+</Solution>

@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="GatewayAudition.Application/GatewayAudition.Application.csproj" />
+  <Project Path="GatewayAudition.Domain/GatewayAudition.Domain.csproj" />
+  <Project Path="GatewayAudition.Host/GatewayAudition.Host.csproj" />
+  <Project Path="GatewayAudition.Infrastructure/GatewayAudition.Infrastructure.csproj" />
+</Solution>
