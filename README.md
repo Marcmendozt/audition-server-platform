@@ -114,7 +114,7 @@ dotnet run --project 05-GameServer/src/Audition.GameServer.Host
 - AccountServer y GameServer ya tienen soluciones .NET operativas dentro de `src/`
 - parte del protocolo legacy ya fue recuperada y documentada
 - el GameServer sigue en trabajo activo de compatibilidad con cliente legacy
-- el repositorio conserva runtime y datos auxiliares necesarios para pruebas locales
+- el repositorio prioriza codigo fuente, configuracion y scripts por encima de assets runtime pesados
 
 ## Notas de versionado
 
@@ -125,8 +125,10 @@ El repositorio ignora por defecto:
 - artefactos temporales
 - contenido decompilado
 - cliente del juego
+- binarios nativos auxiliares
+- assets runtime pesados como sonido y scripts legacy del GameServer
 
-Si vas a publicar este repositorio fuera de un entorno privado, revisa primero los assets runtime y archivos de datos incluidos.
+Los assets runtime excluidos deben provisionarse por separado en entornos locales o privados cuando sean necesarios para pruebas completas.
 
 ## Documentacion por servicio
 
