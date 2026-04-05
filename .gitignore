@@ -33,6 +33,13 @@ Desktop.ini
 # Game client binaries and assets
 06-AuditionClient/
 
+# Runtime assets and native binaries kept fuera del repo
+03-GatewayServer/native/
+05-GameServer/native/
+05-GameServer/script/
+05-GameServer/sound/
+07-Tools/Audition-Client-Landing-Ip.exe
+
 # Legacy game server runtime content not needed in source control
 05-GameServer/antiguo/
 05-GameServer/build-verify/
